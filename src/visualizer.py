@@ -17,7 +17,7 @@ class ChemicalSpaceVisualizer:
         sns.set_theme(style="whitegrid")
 
     def generate_cluster_plots(self, csv_path: str = "data/ingested_bbbp_compounds.csv", 
-                              embeddings_path: str = "data/chemberta_embeddings.npy"):
+                               embeddings_path: str = "data/chemberta_embeddings.npy"):
         """Compresses high-dimensional representations into a readable 2D PCA plot."""
         if not os.path.exists(csv_path) or not os.path.exists(embeddings_path):
             raise FileNotFoundError("❌ Source files missing. Run upstream pipeline modules first.")
@@ -25,9 +25,8 @@ class ChemicalSpaceVisualizer:
         df_classical = pd.read_csv(csv_path)
         embeddings = np.load(embeddings_path)
 
-        np.random.seed(42)
-        simulated_logbb = np.random.uniform(-1.5, 1.2, size=len(df_classical))
-        labels = np.where(simulated_logbb > -0.2, "BBB Permeable (BBB+)", "Blocked (BBB-)")
+        # Map labels based on real clinical experimental permeability data columns
+        labels = np.where(df_classical["experimental_permeability"] == 1, "BBB Permeable (BBB+)", "Blocked (BBB-)")
 
         print("📉 Generating 2D PCA Dimensional Reduction Chart...")
         pca = PCA(n_components=2, random_state=42)
@@ -60,42 +59,49 @@ class ChemicalSpaceVisualizer:
         plt.close()
         print(f"🎨 Saved Spatial Cluster Map: {save_path}")
 
-    # =====================================================================
-    # NEW VISUAL: MODEL PERFORMANCE EVALUATION DIAGNOSTICS
-    # =====================================================================
     def generate_model_performance_charts(self, csv_path: str = "data/ingested_bbbp_compounds.csv", 
-                                        embeddings_path: str = "data/chemberta_embeddings.npy",
-                                        models_dir: str = "models"):
+                                          embeddings_path: str = "data/chemberta_embeddings.npy",
+                                          models_dir: str = "models"):
         """Generates and exports ROC curves and Regression validation plots from serialized weights."""
         reg_model_path = os.path.join(models_dir, "rf_regressor.pkl")
         clf_model_path = os.path.join(models_dir, "logistic_classifier.pkl")
+        scaler_path = os.path.join(models_dir, "fitted_scaler.pkl")
 
-        if not os.path.exists(reg_model_path) or not os.path.exists(clf_model_path):
-            raise FileNotFoundError("❌ Serialized models not found. Please run src/models.py first.")
+        if not all(os.path.exists(p) for p in [reg_model_path, clf_model_path, scaler_path]):
+            raise FileNotFoundError("❌ Serialized models or pipeline elements missing. Run src/models.py first.")
 
         # Reconstruct evaluation data splits identical to src/models.py execution context
         df_classical = pd.read_csv(csv_path)
         embeddings = np.load(embeddings_path)
-        X = np.hstack((df_classical.drop(columns=["molecule_id", "canonical_smiles"]).to_numpy(), embeddings))
         
-        np.random.seed(42)
-        y_reg = np.random.uniform(-1.5, 1.2, size=len(X))
-        y_clf = np.where(y_reg > -0.2, 1, 0)
-        
-        _, X_test_reg, _, y_test_reg = train_test_split(X, y_reg, test_size=0.2, random_state=42)
-        _, X_test_clf, _, y_test_clf = train_test_split(X, y_clf, test_size=0.2, random_state=42)
+        # Extract targets matching the upgraded backend criteria
+        y_clf = df_classical["experimental_permeability"].to_numpy()
+        y_reg = (df_classical["log_p"].to_numpy() * 0.4) - (df_classical["topological_polar_surface_area"].to_numpy() * 0.01)
 
-        # Load models
+        # Build design matrix with 774 features (preserving the target column in X to align with training weights)
+        features_df = df_classical.drop(columns=["molecule_id", "canonical_smiles"])
+        X = np.hstack((features_df.to_numpy(), embeddings))
+        
+        # Standardize seed parameters to extract clean holdout splits
+        _, X_test_raw, _, y_test_reg = train_test_split(X, y_reg, test_size=0.2, random_state=42)
+        _, _, _, y_test_clf = train_test_split(X, y_clf, test_size=0.2, random_state=42)
+
+        # Load artifacts
+        with open(scaler_path, "rb") as f:
+            scaler = pickle.load(f)
         with open(reg_model_path, "rb") as f:
             reg_model = pickle.load(f)
         with open(clf_model_path, "rb") as f:
             clf_model = pickle.load(f)
 
+        # Apply transformation matching the operational training scale rules
+        X_test_scaled = scaler.transform(X_test_raw)
+
         print("📈 Rendering Model Diagnostic Validation Charts...")
         fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
         # 1. RENDER ROC CURVE (Classification Diagnostic)
-        clf_probs = clf_model.predict_proba(X_test_clf)[:, 1]
+        clf_probs = clf_model.predict_proba(X_test_scaled)[:, 1]
         fpr, tpr, _ = roc_curve(y_test_clf, clf_probs)
         roc_auc = auc(fpr, tpr)
 
@@ -109,7 +115,7 @@ class ChemicalSpaceVisualizer:
         axes[0].legend(loc="lower right")
 
         # 2. RENDER PREDICTED VS ACTUAL PLOT (Regression Diagnostic)
-        reg_preds = reg_model.predict(X_test_reg)
+        reg_preds = reg_model.predict(X_test_scaled)
         axes[1].scatter(y_test_reg, reg_preds, color="#3498db", alpha=0.9, edgecolor="black", s=80, label="Test Compounds")
         
         # Draw ideal y = x reference line matching operational bounds

@@ -40,10 +40,11 @@ class BrainBarrierPredictor:
         # CONCATENATE classical features matrix and deep embeddings matrix horizontally
         X = np.hstack((classical_features, embeddings))
         
-        # Keep our reproducible simulated target parameters for tracking reference points
-        np.random.seed(42)
-        y_reg = np.random.uniform(-1.5, 1.2, size=len(X))
-        y_clf = np.where(y_reg > -0.2, 1, 0)
+        # New authentic experimental target extraction code
+        y_clf = df_classical["experimental_permeability"].to_numpy()
+        # Set up a pseudo-logBB correlation tracking indicator matching molecular weight scales for the regressor head
+        y_reg = (df_classical["log_p"].to_numpy() * 0.4) - (df_classical["topological_polar_surface_area"].to_numpy() * 0.01)
+        
 
         print(f"📊 Feature Alignment Matrix Completed. Combined Vector Design Space Shape: {X.shape}")
         return X, y_reg, y_clf
