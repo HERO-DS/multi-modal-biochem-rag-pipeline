@@ -4,6 +4,7 @@ import requests
 from rdkit import Chem
 from rdkit.Chem import Draw
 import base64
+import pandas as pd
 
 st.set_page_config(
     page_title="Neuro-Biochem RAG Dashboard",
@@ -11,7 +12,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom Global CSS to polish Streamlit containers and sidebars
 st.markdown(
     """
     <style>
@@ -38,14 +38,12 @@ st.markdown(
 st.title("🧠 Neuro-Chemical Blood-Brain Barrier (BBB) Penetration Dashboard")
 st.markdown("---")
 
-# Setup layout columns
 sidebar_smiles = st.sidebar.text_input("🔬 Enter Target Compound SMILES:", "CCN(CC)CC")
 api_endpoint = "http://127.0.0.1:8000/predict"
 
 tabs = st.tabs(["🔮 Real-Time Inference", "📉 Chemical Embedding Manifolds", "📈 Model Diagnostics"])
 
 def render_svg_molecule(smiles: str):
-    """Generates a clean SVG image string for a SMILES sequence."""
     try:
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
@@ -71,7 +69,7 @@ with tabs[0]:
                 if response.status_code == 200:
                     data = response.json()
                     
-                    # 1. RENDER MOLECULAR STRUCTURE TOP-ROW (Centered Layout)
+                    # 1. Molecular Structure Layout Row
                     st.subheader("Molecular Structure Layout")
                     mol_svg = render_svg_molecule(sidebar_smiles)
                     if mol_svg:
@@ -82,7 +80,7 @@ with tabs[0]:
                     else:
                         st.warning("⚠️ Could not render 2D molecular layout.")
                     
-                    # 2. RENDER PIPELINE MODEL INFERENCE HEADS (Full Width Container)
+                    # 2. Pipeline Model Inference metrics
                     st.subheader("Classification & Partition Metrics")
                     col1, col2, col3 = st.columns(3)
                     with col1:
@@ -120,7 +118,7 @@ with tabs[0]:
 
                     st.markdown("<br>", unsafe_allow_html=True)
                         
-                    # 3. RENDER CLASSICAL BIOCHEMICAL PROPERTIES
+                    # 3. Classical biochemical indicators
                     st.subheader("Computed Biochemical Structural Metrics")
                     col_m1, col_m2 = st.columns(2)
                     with col_m1:
@@ -143,6 +141,19 @@ with tabs[0]:
                             """, 
                             unsafe_allow_html=True
                         )
+                        
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    
+                    # 4. RAG CONTEXTUAL REPORT VIEW
+                    st.subheader("🧠 Knowledge Base RAG Analysis Report")
+                    st.info(data["rag_summary"])
+                    
+                    st.markdown("##### Structurally Similar Reference Compounds (Training Store Matches)")
+                    neighbors_df = pd.DataFrame(data["nearest_neighbors"])
+                    if not neighbors_df.empty:
+                        neighbors_df.columns = ["Molecule ID", "SMILES Sequence", "Vector Distance (L2)"]
+                        st.dataframe(neighbors_df, use_container_width=True)
+
                 else:
                     st.error(f"Backend API failure. Status code: {response.status_code}")
             except Exception as e:
