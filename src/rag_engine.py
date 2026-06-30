@@ -1,64 +1,49 @@
-import os
+# src/rag_engine.py
 import numpy as np
-import pandas as pd
-from src.vector_store import BiochemicalKnowledgeStore
+from src.vector_store import MolecularVectorStore
 
-class BiochemRAGEngine:
-    """Orchestrates vector retrieval and context generation for molecular screening."""
-    
-    def __init__(self):
-        self.store = BiochemicalKnowledgeStore()
-        try:
-            self.store.load_vector_index()
-            self.initialized = True
-        except Exception as e:
-            print(f"⚠️ Vector store initialization delayed: {str(e)}")
-            self.initialized = False
+class MolecularRAGEngine:
+    def __init__(self, db_path: str = "data/chroma_db"):
+        """Initializes the RAG retrieval router using our persistent ChromaDB instance."""
+        self.v_store = MolecularVectorStore(db_path=db_path)
 
-    def generate_clinical_context(self, canonical_smiles: str, predicted_class: int, predicted_logbb: float, top_k: int = 3) -> dict:
-        """Retrieves nearest neighbor molecules and builds a structural analysis report."""
-        if not self.initialized:
-            try:
-                self.store.load_vector_index()
-                self.initialized = True
-            except Exception:
-                return {"error": "Knowledge store index files are unavailable."}
-
-        # 1. Generate structural query vector matching ChemBERTa dimensions (768)
-        np.random.seed(hash(canonical_smiles) % (2**32))
-        query_embedding = np.random.normal(0.0, 0.1, 768)
-
-        # 2. Query vector store for nearest neighbor historical hits
-        try:
-            hits = self.store.query_nearest_compounds(query_embedding, top_k=top_k)
-        except Exception as e:
-            return {"error": f"Vector retrieval failure: {str(e)}"}
-
-        # 3. Construct automated clinical explanation matching the retrieved context
-        status_str = "Permeable (BBB+)" if predicted_class == 1 else "Blocked (BBB-)"
+    def retrieve_molecular_context(self, query_embedding: np.ndarray, n_results: int = 3) -> str:
+        """Finds closest neighbors and formats them into a clean text prompt context block."""
+        # Convert matrix back to flat list for ChromaDB API compatibility
+        flat_embedding = query_embedding.flatten().tolist()
         
-        summary = f"The target compound ({canonical_smiles}) is predicted to be **{status_str}** with a logBB partition of {predicted_logbb:.4f}. "
-        summary += f"Vector search identified {top_k} structurally analogous molecules in the training repository. "
+        # Execute Vector Space Search
+        raw_results = self.v_store.query_nearest_neighbors(flat_embedding, n_results=n_results)
         
-        neighbor_details = []
-        for idx, row in hits.iterrows():
-            neighbor_details.append({
-                "molecule_id": row.get("molecule_id", f"REF_{idx}"),
-                "smiles": row.get("canonical_smiles", "N/A"),
-                "distance": float(row["similarity_distance_score"])
-            })
+        if not raw_results or not raw_results['documents'] or len(raw_results['documents'][0]) == 0:
+            return "No historical molecular analogs found in the current vector space knowledge base."
 
-        return {
-            "summary": summary,
-            "nearest_neighbors": neighbor_details,
-            "coordinates": {
-                "pca": list(np.random.normal(0.0, 1.0, 2)),  # Mock coordinates for dynamic plotting
-                "tsne": list(np.random.normal(0.0, 1.0, 2))
-            }
-        }
+        # Compile matching records into a structured prompt layout
+        context_blocks = []
+        for i in range(len(raw_results['documents'][0])):
+            smiles = raw_results['documents'][0][i]
+            meta = raw_results['metadatas'][0][i]
+            distance = raw_results['distances'][0][i] if 'distances' in raw_results else 0.0
+            
+            block = (
+                f"--- Reference Compound Analog #{i+1} ---\n"
+                f"• Molecule ID: {meta.get('compound_name', 'Unknown')}\n"
+                f"• Structural Key (SMILES): {smiles}\n"
+                f"• Calculated LogP: {meta.get('logBB', 'N/A')}\n"
+                f"• Experimental BBB Permeability State: {meta.get('p_np', 'N/A')}\n"
+                f"• Vector Cosine Spatial Distance: {distance:.4f}\n"
+            )
+            context_blocks.append(block)
+
+        return "\n".join(context_blocks)
 
 if __name__ == "__main__":
-    engine = BiochemRAGEngine()
-    if engine.initialized:
-        report = engine.generate_clinical_context("CCN(CC)CC", 1, -1.0894)
-        print("\n📝 Generated RAG Report Summary:\n", report["summary"])
+    # Smoke test to make sure retrieval routes execute perfectly
+    print("🧪 Testing RAG Routing Channel...")
+    engine = MolecularRAGEngine()
+    
+    # Create a mock 768-D query dimension vector
+    mock_vector = np.random.uniform(-1, 1, (1, 768))
+    retrieved_text = engine.retrieve_molecular_context(mock_vector, n_results=2)
+    print("\n📬 Sample Retrieval Output Context Window:\n")
+    print(retrieved_text)
