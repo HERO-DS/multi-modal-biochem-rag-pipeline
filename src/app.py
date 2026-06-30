@@ -15,7 +15,6 @@ parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-# Now Python can safely import your custom modules without throwing a ModuleNotFoundError
 from src.rag_engine import BiochemRAGEngine
 
 # Core asset loading paths
@@ -24,7 +23,7 @@ SCALER_PATH = os.path.join(MODELS_DIR, "fitted_scaler.pkl")
 REG_PATH = os.path.join(MODELS_DIR, "rf_regressor.pkl")
 CLF_PATH = os.path.join(MODELS_DIR, "logistic_classifier.pkl")
 
-# Infrastructure weights placeholders
+# Infrastructure components
 scaler = None
 reg_model = None
 clf_model = None
@@ -44,16 +43,13 @@ async def lifespan(app: FastAPI):
     with open(CLF_PATH, "rb") as f:
         clf_model = pickle.load(f)
         
-    # Instantiate the RAG engine layer
     rag_engine = BiochemRAGEngine()
     print("🚀 Production inference models and RAG Engine successfully mounted into API memory state.")
     yield
     print("🛑 Unmounting application memory state.")
 
-# CRITICAL: This defines the 'app' attribute Uvicorn is looking for!
 app = FastAPI(
     title="Multi-Modal Biochem RAG Pipeline Prediction Service",
-    description="Asynchronous backend inference engine running ChemBERTa + RDKit structural features.",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -70,13 +66,12 @@ class InferenceResponse(BaseModel):
     log_p: float
     rag_summary: str
     nearest_neighbors: list
+    coordinates: dict  # Exposes the dynamic tracking coordinate matrix
 
 def compute_classical_rdkit_features(smiles: str) -> dict:
-    """Computes exact physiological descriptors matching pipeline definitions."""
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise ValueError("Invalid SMILES format encountered.")
-        
     return {
         "molecular_weight": Descriptors.MolWt(mol),
         "num_radical_electrons": Descriptors.NumRadicalElectrons(mol),
@@ -87,19 +82,15 @@ def compute_classical_rdkit_features(smiles: str) -> dict:
 
 @app.post("/predict", response_model=InferenceResponse)
 async def run_pipeline_inference(payload: InferenceRequest):
-    """Processes incoming chemical string structures through the complete 774-feature stack."""
     if scaler is None or reg_model is None or clf_model is None or rag_engine is None:
         raise HTTPException(status_code=503, detail="Inference engine components not fully initialized.")
 
     try:
-        # 1. Compute RDKit mathematical features
         props = compute_classical_rdkit_features(payload.canonical_smiles)
         
-        # 2. Embedding generator alignment space
         np.random.seed(hash(payload.canonical_smiles) % (2**32))
         mock_chemberta_embedding = np.random.normal(0.0, 0.1, 768)
 
-        # 3. Assemble full 774-feature matrix layer
         classical_vector = [
             props["molecular_weight"],
             props["num_radical_electrons"],
@@ -110,17 +101,14 @@ async def run_pipeline_inference(payload: InferenceRequest):
         ]
         
         full_feature_vector = np.hstack((classical_vector, mock_chemberta_embedding)).reshape(1, -1)
-        
-        # 4. Standardize and execute predictions across heads
         scaled_features = scaler.transform(full_feature_vector)
         
         prob_scores = clf_model.predict_proba(scaled_features)[0]
         prediction_class = int(clf_model.predict(scaled_features)[0])
         confidence_score = float(prob_scores[prediction_class])
-        
         predicted_logbb_val = float(reg_model.predict(scaled_features)[0])
 
-        # 5. Generate RAG Context Report via the loaded Engine
+        # Generate RAG Context Report via the loaded Engine
         rag_report = rag_engine.generate_clinical_context(
             payload.canonical_smiles, prediction_class, predicted_logbb_val, top_k=3
         )
@@ -133,7 +121,8 @@ async def run_pipeline_inference(payload: InferenceRequest):
             "molecular_weight": props["molecular_weight"],
             "log_p": props["log_p"],
             "rag_summary": rag_report.get("summary", "Context unavailable."),
-            "nearest_neighbors": rag_report.get("nearest_neighbors", [])
+            "nearest_neighbors": rag_report.get("nearest_neighbors", []),
+            "coordinates": rag_report.get("coordinates", {"pca": [0.0, 0.0], "tsne": [0.0, 0.0]})
         }
 
     except Exception as e:
@@ -141,5 +130,4 @@ async def run_pipeline_inference(payload: InferenceRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    # Points cleanly to the app object within the src package structure
     uvicorn.run("src.app:app", host="127.0.0.1", port=8000, reload=False)
