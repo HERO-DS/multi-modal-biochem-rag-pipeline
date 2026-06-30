@@ -1,133 +1,88 @@
-import os
-import sys
-import pickle
-import numpy as np
-import pandas as pd
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from rdkit import Chem
-from rdkit.Chem import Descriptors, Crippen
-from contextlib import asynccontextmanager
+# app.py
+import streamlit as st
+import requests
 
-# Dynamic path patch: Force Python to treat the parent folder as a root package module
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
-
-from src.rag_engine import BiochemRAGEngine
-
-# Core asset loading paths
-MODELS_DIR = "models"
-SCALER_PATH = os.path.join(MODELS_DIR, "fitted_scaler.pkl")
-REG_PATH = os.path.join(MODELS_DIR, "rf_regressor.pkl")
-CLF_PATH = os.path.join(MODELS_DIR, "logistic_classifier.pkl")
-
-# Infrastructure components
-scaler = None
-reg_model = None
-clf_model = None
-rag_engine = None
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Modern context manager handling safe startup and shutdown cycles."""
-    global scaler, reg_model, clf_model, rag_engine
-    if not all(os.path.exists(p) for p in [SCALER_PATH, REG_PATH, CLF_PATH]):
-        raise RuntimeError("❌ Cannot initialize API. Serialized pipeline models are missing from disk.")
-    
-    with open(SCALER_PATH, "rb") as f:
-        scaler = pickle.load(f)
-    with open(REG_PATH, "rb") as f:
-        reg_model = pickle.load(f)
-    with open(CLF_PATH, "rb") as f:
-        clf_model = pickle.load(f)
-        
-    rag_engine = BiochemRAGEngine()
-    print("🚀 Production inference models and RAG Engine successfully mounted into API memory state.")
-    yield
-    print("🛑 Unmounting application memory state.")
-
-app = FastAPI(
-    title="Multi-Modal Biochem RAG Pipeline Prediction Service",
-    version="1.0.0",
-    lifespan=lifespan
+# 1. Page Configurations
+st.set_page_config(
+    page_title="Biochem Multi-Modal RAG Platform",
+    page_icon="🧬",
+    layout="wide"
 )
 
-class InferenceRequest(BaseModel):
-    canonical_smiles: str
+# 2. Main Header App Styling
+st.title("🧬 Multi-Modal Biochemical Predictive Engine")
+st.markdown("""
+Welcome to the RAG Serving Layer Dashboard. Enter a raw **SMILES** string sequence below 
+to extract deep embedding structures via **ChemBERTa** and evaluate blood-brain barrier (BBB) properties in real-time.
+""")
+st.write("---")
 
-class InferenceResponse(BaseModel):
-    canonical_smiles: str
-    is_bbb_permeable: int
-    permeability_confidence: float
-    predicted_logbb: float
-    molecular_weight: float
-    log_p: float
-    rag_summary: str
-    nearest_neighbors: list
-    coordinates: dict  # Exposes the dynamic tracking coordinate matrix
+# 3. Create Sidebar for System Status Information
+st.sidebar.header("⚙️ Backend Service Mapping")
+backend_url = st.sidebar.text_input("FastAPI Endpoint URL", value="http://127.0.0.1:8000/api/v1/predict")
 
-def compute_classical_rdkit_features(smiles: str) -> dict:
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        raise ValueError("Invalid SMILES format encountered.")
-    return {
-        "molecular_weight": Descriptors.MolWt(mol),
-        "num_radical_electrons": Descriptors.NumRadicalElectrons(mol),
-        "log_p": Crippen.MolLogP(mol),
-        "heavy_atom_count": Descriptors.HeavyAtomCount(mol),
-        "topological_polar_surface_area": Descriptors.TPSA(mol)
-    }
+st.sidebar.markdown("---")
+st.sidebar.info("""
+**Pipeline Metrics Status:**
+* Embeddings Layer: Active (768-D)
+* Regression Head: Random Forest
+* Classification Head: Logistic Regression
+""")
 
-@app.post("/predict", response_model=InferenceResponse)
-async def run_pipeline_inference(payload: InferenceRequest):
-    if scaler is None or reg_model is None or clf_model is None or rag_engine is None:
-        raise HTTPException(status_code=503, detail="Inference engine components not fully initialized.")
+# 4. Main UI Input Layout Split
+col1, col2 = st.columns([1, 2])
 
-    try:
-        props = compute_classical_rdkit_features(payload.canonical_smiles)
-        
-        np.random.seed(hash(payload.canonical_smiles) % (2**32))
-        mock_chemberta_embedding = np.random.normal(0.0, 0.1, 768)
+with col1:
+    st.subheader("🔬 Target Molecular Input")
+    # Sample SMILES container presets
+    smiles_input = st.text_input("Enter SMILES String", value="CCO", help="e.g., CCO for Ethanol, CN1C=NC2=C1C(=O)N(C(=O)N2C)C for Caffeine")
+    
+    submit_btn = st.button("Run Pipeline Inference", type="primary", use_container_width=True)
 
-        classical_vector = [
-            props["molecular_weight"],
-            props["num_radical_electrons"],
-            props["log_p"],
-            props["heavy_atom_count"],
-            props["topological_polar_surface_area"],
-            1.0 
-        ]
-        
-        full_feature_vector = np.hstack((classical_vector, mock_chemberta_embedding)).reshape(1, -1)
-        scaled_features = scaler.transform(full_feature_vector)
-        
-        prob_scores = clf_model.predict_proba(scaled_features)[0]
-        prediction_class = int(clf_model.predict(scaled_features)[0])
-        confidence_score = float(prob_scores[prediction_class])
-        predicted_logbb_val = float(reg_model.predict(scaled_features)[0])
-
-        # Generate RAG Context Report via the loaded Engine
-        rag_report = rag_engine.generate_clinical_context(
-            payload.canonical_smiles, prediction_class, predicted_logbb_val, top_k=3
-        )
-
-        return {
-            "canonical_smiles": payload.canonical_smiles,
-            "is_bbb_permeable": prediction_class,
-            "permeability_confidence": confidence_score,
-            "predicted_logbb": predicted_logbb_val,
-            "molecular_weight": props["molecular_weight"],
-            "log_p": props["log_p"],
-            "rag_summary": rag_report.get("summary", "Context unavailable."),
-            "nearest_neighbors": rag_report.get("nearest_neighbors", []),
-            "coordinates": rag_report.get("coordinates", {"pca": [0.0, 0.0], "tsne": [0.0, 0.0]})
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Pipeline inference failure: {str(e)}")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("src.app:app", host="127.0.0.1", port=8000, reload=False)
+with col2:
+    st.subheader("📊 Diagnostic Output Analysis")
+    
+    if submit_btn:
+        with st.spinner("Streaming data through multi-modal model heads..."):
+            try:
+                # Pack the payload exactly matching the FastAPI SmilesPayload Schema
+                payload = {"smiles": smiles_input}
+                response = requests.post(backend_url, json=payload)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Distribute numerical predictions into clean UI metric blocks
+                    m1, m2 = st.columns(2)
+                    with m1:
+                        st.metric(
+                            label="Estimated Partition Coefficient (logBB)", 
+                            value=f"{data['logBB_prediction']:.4f}"
+                        )
+                    with m2:
+                        prob_percentage = data['permeability_probability'] * 100
+                        st.metric(
+                            label="Permeability Confidence", 
+                            value=f"{prob_percentage:.2f}%"
+                        )
+                    
+                    st.write("---")
+                    
+                    # Highlight Classification State using native Alert Layouts
+                    if data['is_permeable']:
+                        st.success("🧠 **Model Prediction:** This molecule is classified as **BBB+** (Permeable to the Blood-Brain Barrier).")
+                    else:
+                        st.error("🚫 **Model Prediction:** This molecule is classified as **BBB-** (Non-permeable / Blocked by the Barrier).")
+                        
+                    # 5. Diagnostic Vector Visualization
+                    st.markdown("### 🧬 ChemBERTa Vector Profile Extract")
+                    st.markdown("Below are the first 5 dimensions extracted from the frozen 768-D contextual attention layer:")
+                    st.json(data['embedding_sample'])
+                    
+                else:
+                    st.error(f"Backend Server Error (Code {response.status_code}): {response.text}")
+                    
+            except requests.exceptions.ConnectionError:
+                st.error("❌ Connection Refused! Make sure your FastAPI backend server is actively running (`uvicorn src.serving_app:app --reload`) on port 8000.")
+    else:
+        st.info("💡 Standby. Enter a SMILES code configuration and press 'Run Pipeline Inference' to start processing.")
